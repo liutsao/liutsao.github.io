@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>委託排單記錄 (雲端同步版)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&display=swap');
+        
+        body {
+            font-family: 'Noto Sans TC', sans-serif;
+            background-color: #f9fafb;
+            color: #1f2937;
+        }
+
+        .blurred {
+            filter: blur(5px);
+            user-select: none;
+            transition: filter 0.3s;
+        }
+
+        .status-badge {
+            padding: 2px 8px;
+            border-radius: 9999px;
+            font-size: 0.875rem;
+            font-weight: 500;
+        }
+
+        .status-pending { background-color: #fef3c7; color: #92400e; }
+        .status-drawing { background-color: #dbeafe; color: #1e40af; }
+        .status-checking { background-color: #f3e8ff; color: #6b21a8; }
+        .status-delivered { background-color: #d1fae5; color: #065f46; }
+        .status-completed { background-color: #e5e7eb; color: #374151; }
+        .status-cancelled { background-color: #fee2e2; color: #991b1b; }
+
+        .loading-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(255,255,255,0.8);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 100;
+        }
+    </style>
+</head>
+<body class="min-h-screen flex">
+
+    <div id="loading" class="loading-overlay">
+        <div class="animate-spin rounded-full h-10 w-10 border-b-2 border-blue-600"></div>
+    </div>
+
+    <!-- 左側選單 -->
+    <aside id="sidebar" class="w-64 bg-white border-r h-screen sticky top-0 hidden flex-col">
+        <div class="p-6 border-b">
+            <h2 class="font-bold text-lg text-gray-800">歷史排單表</h2>
+        </div>
+        <div id="historyList" class="flex-1 overflow-y-auto p-4 space-y-2"></div>
+    </aside>
+
+    <main class="flex-1 p-8">
+        <header class="flex justify-between items-center mb-10">
+            <div>
+                <h1 id="tableTitle" class="text-3xl font-bold text-gray-900">載入中...</h1>
+                <p class="text-gray-500 mt-2">最後更新：<span id="updateTime">---</span></p>
+            </div>
+            
+            <div class="flex items-center gap-4">
+                <div id="adminControls" class="hidden flex items-center gap-3">
+                    <div class="bg-blue-50 px-4 py-2 rounded-lg border border-blue-100">
+                        <span class="text-sm text-blue-600 font-medium">總金額：$</span>
+                        <span id="totalAmount" class="text-blue-700 font-bold">0</span>
+                    </div>
+                    <button onclick="archiveCurrentTable()" class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg text-sm transition">
+                        存入歷史並新增
+                    </button>
+                    <button onclick="logout()" class="text-gray-400 hover:text-red-500 transition">
+                        退出管理
+                    </button>
+                </div>
+                <button id="loginBtn" onclick="promptLogin()" class="bg-white border border-gray-200 shadow-sm hover:shadow-md px-4 py-2 rounded-lg text-sm font-medium transition">
+                    管理員登入
+                </button>
+            </div>
+        </header>
+
+        <div class="bg-white shadow-sm border border-gray-100 rounded-xl overflow-hidden">
+            <div class="p-6 border-b flex justify-between items-center">
+                <div id="editTitleSection" class="hidden flex-1 mr-4">
+                    <input type="text" id="titleInput" class="w-full border p-2 rounded text-xl font-bold" placeholder="輸入排單表標題...">
+                </div>
+                <div id="editActions" class="hidden">
+                    <button onclick="addCommission()" class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg text-sm flex items-center gap-2">
+                        <span>+</span> 新增委託
+                    </button>
+                </div>
+            </div>
+
+            <table class="w-full text-left border-collapse">
+                <thead>
+                    <tr class="bg-gray-50 text-gray-600 text-sm uppercase">
+                        <th class="p-4 font-semibold border-b">委託人 ID</th>
+                        <th class="p-4 font-semibold border-b">來源</th>
+                        <th class="p-4 font-semibold border-b">進行狀態</th>
+                        <th class="p-4 font-semibold border-b">委託內容</th>
+                        <th class="p-4 font-semibold border-b text-right">委託金額</th>
+                        <th class="admin-only-header hidden p-4 font-semibold border-b text-center">操作</th>
+                    </tr>
+                </thead>
+                <tbody id="commissionTableBody"></tbody>
+            </table>
+        </div>
+    </main>
+
+    <!-- Modal -->
+    <div id="customModal" class="fixed inset-0 bg-black/50 hidden flex items-center justify-center z-50">
+        <div class="bg-white p-6 rounded-xl shadow-xl w-80">
+            <h3 id="modalTitle" class="text-lg font-bold mb-4">管理員登入</h3>
+            <input type="password" id="modalInput" class="w-full border p-2 rounded mb-4" placeholder="請輸入密碼...">
+            <div class="flex justify-end gap-2">
+                <button onclick="closeModal()" class="px-4 py-2 text-gray-500">取消</button>
+                <button id="modalConfirm" class="px-4 py-2 bg-blue-600 text-white rounded">確認</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Firebase SDK -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, getDoc, collection, query, onSnapshot, updateDoc, deleteDoc, addDoc, Timestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Firebase 配置 (由環境提供)
+        const firebaseConfig = JSON.parse(__firebase_config);
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'commission-system-001';
+
+        // 狀態管理
+        let user = null;
+        let isAdmin = false;
+        let currentTableData = null;
+        let historyData = [];
+        let viewingTableId = 'current'; // 'current' or specific ID
+
+        // 初始化 Auth
+        const initAuth = async () => {
+            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                await signInWithCustomToken(auth, __initial_auth_token);
+            } else {
+                await signInAnonymously(auth);
+            }
+        };
+
+        initAuth();
+
+        onAuthStateChanged(auth, (u) => {
+            user = u;
+            if (user) {
+                // 讀取當前排單
+                setupRealtimeListeners();
+            }
+        });
+
+        // 監聽雲端資料
+        function setupRealtimeListeners() {
+            // 監聽目前排單 (Public)
+            const currentDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'current_table');
+            onSnapshot(currentDocRef, (docSnap) => {
+                if (docSnap.exists()) {
+                    currentTableData = docSnap.data();
+                } else {
+                    // 初始化預設資料
+                    currentTableData = {
+                        title: "新委託排單表",
+                        lastUpdate: new Date().toLocaleDateString(),
+                        commissions: []
+                    };
+                    saveCurrentToCloud();
+                }
+                if (viewingTableId === 'current') renderTable(currentTableData);
+                document.getElementById('loading').classList.add('hidden');
+            }, (error) => console.error("Snapshot error:", error));
+
+            // 監聽歷史排單 (Public)
+            const historyColRef = collection(db, 'artifacts', appId, 'public', 'data', 'history');
+            onSnapshot(historyColRef, (querySnapshot) => {
+                historyData = [];
+                querySnapshot.forEach((doc) => {
+                    historyData.push({ ...doc.data(), firebaseId: doc.id });
+                });
+                updateSidebar();
+            });
+        }
+
+        // 渲染邏輯
+        window.renderTable = function(data) {
+            const tbody = document.getElementById('commissionTableBody');
+            const totalDisplay = document.getElementById('totalAmount');
+            const titleDisplay = document.getElementById('tableTitle');
+            const updateDisplay = document.getElementById('updateTime');
+            const adminHeaders = document.querySelectorAll('.admin-only-header');
+
+            tbody.innerHTML = '';
+            titleDisplay.innerText = data.title;
+            updateDisplay.innerText = data.lastUpdate;
+
+            let total = 0;
+            const isEditing = isAdmin && viewingTableId === 'current';
+
+            if (isAdmin) {
+                adminHeaders.forEach(h => h.classList.remove('hidden'));
+            } else {
+                adminHeaders.forEach(h => h.classList.add('hidden'));
+            }
+
+            data.commissions.forEach((com, index) => {
+                total += parseInt(com.price || 0);
+                const tr = document.createElement('tr');
+                tr.className = "hover:bg-gray-50 transition border-b border-gray-100 last:border-0";
+                
+                tr.innerHTML = `
+                    <td class="p-4">
+                        ${isEditing ? `<input type="text" value="${com.id}" onchange="updateRow(${index}, 'id', this.value)" class="border p-1 rounded w-full">` : `<span class="font-medium">${com.id}</span>`}
+                    </td>
+                    <td class="p-4 text-gray-600">
+                        ${isEditing ? `<input type="text" value="${com.source}" onchange="updateRow(${index}, 'source', this.value)" class="border p-1 rounded w-full">` : com.source}
+                    </td>
+                    <td class="p-4">
+                        ${isEditing ? `
+                            <select onchange="updateRow(${index}, 'status', this.value)" class="border p-1 rounded w-full">
+                                ${['待付款','繪製中','靜態確認','已交稿','已完成','取消排單'].map(s => `<option value="${s}" ${s === com.status ? 'selected' : ''}>${s}</option>`).join('')}
+                            </select>
+                        ` : `<span class="status-badge ${getStatusClass(com.status)}">${com.status}</span>`}
+                    </td>
+                    <td class="p-4 ${isAdmin ? '' : 'blurred'}">
+                        ${isEditing ? `<input type="text" value="${com.content}" onchange="updateRow(${index}, 'content', this.value)" class="border p-1 rounded w-full">` : com.content}
+                    </td>
+                    <td class="p-4 text-right font-mono ${isAdmin ? '' : 'blurred'}">
+                        ${isEditing ? `<input type="number" value="${com.price}" onchange="updateRow(${index}, 'price', this.value)" class="border p-1 rounded w-24 text-right">` : `$${(com.price || 0).toLocaleString()}`}
+                    </td>
+                    ${isAdmin ? `
+                        <td class="p-4 text-center">
+                            ${viewingTableId === 'current' ? `<button onclick="deleteRow(${index})" class="text-red-400 hover:text-red-600">刪除</button>` : '-'}
+                        </td>
+                    ` : ''}
+                `;
+                tbody.appendChild(tr);
+            });
+
+            totalDisplay.innerText = total.toLocaleString();
+        };
+
+        function getStatusClass(status) {
+            const classes = { '待付款': 'status-pending', '繪製中': 'status-drawing', '靜態確認': 'status-checking', '已交稿': 'status-delivered', '已完成': 'status-completed', '取消排單': 'status-cancelled' };
+            return classes[status] || '';
+        }
+
+        // 管理員邏輯
+        window.promptLogin = function() {
+            document.getElementById('modalInput').value = '';
+            document.getElementById('customModal').classList.remove('hidden');
+            document.getElementById('modalConfirm').onclick = async () => {
+                if(document.getElementById('modalInput').value === "kk7680771") { // 密碼
+                    isAdmin = true;
+                    toggleAdminUI();
+                    closeModal();
+                } else {
+                    alert('密碼錯誤');
+                }
+            };
+        };
+
+        window.logout = function() {
+            isAdmin = false;
+            viewingTableId = 'current';
+            toggleAdminUI();
+        };
+
+        window.closeModal = () => document.getElementById('customModal').classList.add('hidden');
+
+        function toggleAdminUI() {
+            const adminControls = document.getElementById('adminControls');
+            const loginBtn = document.getElementById('loginBtn');
+            const sidebar = document.getElementById('sidebar');
+            const editActions = document.getElementById('editActions');
+            const editTitleSection = document.getElementById('editTitleSection');
+            const tableTitle = document.getElementById('tableTitle');
+
+            if (isAdmin) {
+                adminControls.classList.remove('hidden');
+                loginBtn.classList.add('hidden');
+                sidebar.classList.remove('hidden');
+                sidebar.classList.add('flex');
+                if (viewingTableId === 'current') {
+                    editActions.classList.remove('hidden');
+                    editTitleSection.classList.remove('hidden');
+                    tableTitle.classList.add('hidden');
+                    document.getElementById('titleInput').value = currentTableData.title;
+                }
+            } else {
+                adminControls.classList.add('hidden');
+                loginBtn.classList.remove('hidden');
+                sidebar.classList.add('hidden');
+                editActions.classList.add('hidden');
+                editTitleSection.classList.add('hidden');
+                tableTitle.classList.remove('hidden');
+            }
+            renderTable(viewingTableId === 'current' ? currentTableData : historyData.find(h => h.firebaseId === viewingTableId));
+        }
+
+        // 資料寫入雲端
+        async function saveCurrentToCloud() {
+            if (!user) return;
+            const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'current_table');
+            await setDoc(docRef, currentTableData);
+        }
+
+        window.updateRow = function(index, field, value) {
+            if (!isAdmin || viewingTableId !== 'current') return;
+            currentTableData.commissions[index][field] = field === 'price' ? parseInt(value) || 0 : value;
+            currentTableData.lastUpdate = new Date().toLocaleString();
+            saveCurrentToCloud();
+        };
+
+        window.addCommission = function() {
+            if (!isAdmin || viewingTableId !== 'current') return;
+            currentTableData.commissions.push({ id: '新委託人', source: '-', status: '待付款', content: '無', price: 0 });
+            saveCurrentToCloud();
+        };
+
+        window.deleteRow = function(index) {
+            if (!isAdmin || viewingTableId !== 'current' || !confirm('確定刪除？')) return;
+            currentTableData.commissions.splice(index, 1);
+            saveCurrentToCloud();
+        };
+
+        // 標題連動
+        document.getElementById('titleInput').oninput = (e) => {
+            if (!isAdmin || viewingTableId !== 'current') return;
+            currentTableData.title = e.target.value;
+            saveCurrentToCloud();
+        };
+
+        // 歷史操作
+        window.archiveCurrentTable = async function() {
+            if (!isAdmin || !confirm('確定存入歷史並清空當前排單？')) return;
+            
+            // 寫入歷史集合
+            const historyColRef = collection(db, 'artifacts', appId, 'public', 'data', 'history');
+            await addDoc(historyColRef, {
+                ...currentTableData,
+                archivedAt: Timestamp.now()
+            });
+
+            // 重置當前
+            currentTableData = {
+                title: "新委託排單表 (" + new Date().toLocaleDateString() + ")",
+                lastUpdate: new Date().toLocaleString(),
+                commissions: []
+            };
+            await saveCurrentToCloud();
+            alert('已成功存檔');
+        };
+
+        function updateSidebar() {
+            const list = document.getElementById('historyList');
+            list.innerHTML = '';
+            
+            const currentBtn = document.createElement('button');
+            currentBtn.className = `w-full text-left p-3 rounded-lg font-medium text-sm border ${viewingTableId === 'current' ? 'bg-blue-50 text-blue-700 border-blue-100' : 'hover:bg-gray-100 text-gray-600 border-transparent'}`;
+            currentBtn.innerText = "● 目前排單";
+            currentBtn.onclick = () => { viewingTableId = 'current'; toggleAdminUI(); };
+            list.appendChild(currentBtn);
+
+            historyData.sort((a,b) => b.archivedAt - a.archivedAt).forEach(item => {
+                const btn = document.createElement('button');
+                btn.className = `w-full text-left p-3 rounded-lg text-sm transition border ${viewingTableId === item.firebaseId ? 'bg-indigo-50 text-indigo-700 border-indigo-100' : 'hover:bg-gray-100 text-gray-600 border-transparent'}`;
+                btn.innerText = item.title;
+                btn.onclick = () => { viewingTableId = item.firebaseId; toggleAdminUI(); };
+                list.appendChild(btn);
+            });
+        }
+    </script>
+</body>
+</html>
